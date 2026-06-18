@@ -1,3 +1,16 @@
+"""张量并行（Tensor Parallelism）线性层层次结构。
+
+类层次：
+  LinearBase（抽象基类）
+  ├── ReplicatedLinear        — 不分片，每个 rank 持有完整副本
+  ├── ColumnParallelLinear    — 切分输出维度（列并行）
+  │     ├── MergedColumnParallelLinear — 两列合并（如 gate+up）
+  │     └── QKVParallelLinear         — Q/K/V 三合一列并行
+  └── RowParallelLinear       — 切分输入维度（行并行），前向后 all_reduce
+
+所有权重加载均通过 weight_loader 回调完成，支持 TP 感知的分片提取。
+"""
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -85,6 +98,15 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         super().__init__(input_size, sum(output_sizes), bias)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: int):
+        """合并列并行权重加载。
+
+        对于 gate+up 合并的权重，loaded_shard_id 标识子组件位置：
+        - 0: gate（偏移 0）
+        - 1: up（偏移 intermediate_size // tp_size）
+
+        shard_offset = 前面子组件大小的累积 // tp_size
+        加载的权重沿 tp_dim 按 tp_size 分块，取当前 rank 的分片。
+        """
         param_data = param.data
         shard_offset = sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
         shard_size = self.output_sizes[loaded_shard_id] // self.tp_size
@@ -112,6 +134,16 @@ class QKVParallelLinear(ColumnParallelLinear):
         super().__init__(hidden_size, output_size, bias)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: str):
+        """QKV 融合权重加载。
+
+        QKV 权重布局（每个 tp rank）：
+          [Q_shard | K_shard | V_shard]
+        - Q 偏移: 0，大小: num_heads * head_size
+        - K 偏移: num_heads * head_size，大小: num_kv_heads * head_size
+        - V 偏移: (num_heads + num_kv_heads) * head_size，大小: num_kv_heads * head_size
+
+        支持 GQA（分组查询注意力）：K/V 的 head 数可少于 Q。
+        """
         param_data = param.data
         assert loaded_shard_id in ["q", "k", "v"]
         if loaded_shard_id == "q":
@@ -150,7 +182,8 @@ class RowParallelLinear(LinearBase):
         param_data.copy_(loaded_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 只有 rank 0 应用 bias（避免所有 rank 重复加 bias）
         y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
         if self.tp_size > 1:
-            dist.all_reduce(y)
+            dist.all_reduce(y)  # 各 rank 的 partial sum 求和得到完整结果
         return y

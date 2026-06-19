@@ -36,6 +36,8 @@ class Config:
     num_kvcache_blocks: int = -1
     # GPU 显存监控间隔（秒），0 或负数表示禁用后台监控
     memory_monitor_interval: float = 0.2
+    # 显存监控是否显示饼图（True=饼图, False=条形图）
+    show_memory_pie: bool = True
 
     def __post_init__(self):
         assert os.path.isdir(self.model)  # 确保模型路径存在

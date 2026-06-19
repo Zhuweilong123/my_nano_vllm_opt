@@ -55,6 +55,9 @@ class ModelRunner:
         self.memory_monitor = GPUMemoryMonitor(
             model_name=os.path.basename(config.model),
             interval=config.memory_monitor_interval,
+            show_pie=config.show_memory_pie,
+            pie_output_dir="memory_analysis",
+            gpu_memory_utilization=config.gpu_memory_utilization,
         )
         self.memory_monitor.calibrate()
 

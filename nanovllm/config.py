@@ -21,7 +21,7 @@ class Config:
     # 最大模型长度（会被 hf_config.max_position_embeddings 钳制）
     max_model_len: int = 4096
     # 可用于 KV cache 的 GPU 内存比例（0~1）
-    gpu_memory_utilization: float = 0.9
+    gpu_memory_utilization: float = 0.8
     # 张量并行 GPU 数量（1=单卡，2/4/8=多卡）
     tensor_parallel_size: int = 1
     # True 时禁用 CUDA graph 优化，强制使用 eager 模式
@@ -34,6 +34,8 @@ class Config:
     kvcache_block_size: int = 256
     # KV cache 块数量（-1 表示由 allocate_kv_cache 根据 GPU 内存自动计算）
     num_kvcache_blocks: int = -1
+    # GPU 显存监控间隔（秒），0 或负数表示禁用后台监控
+    memory_monitor_interval: float = 0.2
 
     def __post_init__(self):
         assert os.path.isdir(self.model)  # 确保模型路径存在

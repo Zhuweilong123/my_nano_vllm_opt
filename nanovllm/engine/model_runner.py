@@ -12,12 +12,15 @@ import torch.distributed as dist
 from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
+import os
+
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
+from nanovllm.utils.memory_monitor import GPUMemoryMonitor
 
 
 class ModelRunner:
@@ -47,14 +50,32 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.dtype)
         torch.set_default_device("cuda")
+
+        # [显存监控] 测量点 0：记录推理前基线显存
+        self.memory_monitor = GPUMemoryMonitor(
+            model_name=os.path.basename(config.model),
+            interval=config.memory_monitor_interval,
+        )
+        self.memory_monitor.calibrate()
+
         # 构建模型并加载权重
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
+
+        # [显存监控] 测量点 2：记录模型权重显存
+        self.memory_monitor.record_weights()
+
         self.sampler = Sampler()
         # 预热：触发 CUDA JIT 编译，获取峰值内存统计
         self.warmup_model()
         # 根据 GPU 可用内存分配 KV cache
         self.allocate_kv_cache()
+
+        # [显存监控] 测量点 1：记录 KV cache 池显存
+        self.memory_monitor.record_kv_cache(
+            self.kv_cache.numel() * self.kv_cache.element_size()
+        )
+
         # 如果未禁用 CUDA graph，提前捕获 decode 图
         if not self.enforce_eager:
             self.capture_cudagraph()

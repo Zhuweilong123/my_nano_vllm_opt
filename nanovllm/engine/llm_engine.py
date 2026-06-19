@@ -6,7 +6,6 @@
 import atexit
 from dataclasses import fields
 from time import perf_counter
-from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 import torch.multiprocessing as mp
 
@@ -70,6 +69,8 @@ class LLMEngine:
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        # 显存监控刷新（主线程中调用，与 tqdm 共用 stdout）
+        self.model_runner.memory_monitor.refresh()
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
         return outputs, num_tokens
 
@@ -83,13 +84,20 @@ class LLMEngine:
         sampling_params: SamplingParams | list[SamplingParams],
         use_tqdm: bool = True,
     ) -> list[str]:
-        pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True, disable=not use_tqdm)
         if not isinstance(sampling_params, list):
             sampling_params = [sampling_params] * len(prompts)
         for prompt, sp in zip(prompts, sampling_params):
             self.add_request(prompt, sp)
         outputs = {}
         prefill_throughput = decode_throughput = 0.
+        total_prompts = len(prompts)
+        finished_count = 0
+
+        # 显存监控启动（输出初始帧，接管终端进度显示）
+        monitor = self.model_runner.memory_monitor
+        monitor.start()
+        monitor.set_progress(finished_count, total_prompts, 0, 0)
+
         while not self.is_finished():
             t = perf_counter()
             output, num_tokens = self.step()
@@ -97,14 +105,17 @@ class LLMEngine:
                 prefill_throughput = num_tokens / (perf_counter() - t)
             else:
                 decode_throughput = -num_tokens / (perf_counter() - t)
-            pbar.set_postfix({
-                "Prefill": f"{int(prefill_throughput)}tok/s",
-                "Decode": f"{int(decode_throughput)}tok/s",
-            })
             for seq_id, token_ids in output:
                 outputs[seq_id] = token_ids
-                pbar.update(1)
-        pbar.close()
+                finished_count += 1
+            # 更新显存监控框中的进度信息
+            monitor.set_progress(
+                finished_count, total_prompts,
+                int(prefill_throughput), int(decode_throughput),
+            )
+
+        monitor.stop()
+
         outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
         outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
         return outputs
